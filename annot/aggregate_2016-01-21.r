@@ -1,0 +1,151 @@
+# Aggregate and organize all sample information tables
+
+library(magrittr);
+library(io);
+
+clin <- qread("Clinical_Data_Absolute_Outputs_09_03_2015.tsv");
+#bmet <- qread("Bmet_2015-01-20_IGV.annot.tsv");
+phylogic <- qread("all_cases_phylogic_SIF_09_01_2015.tsv")
+rna <- qread("RNA_iset.tsv");
+unpaired <- qread("unpaired_met_SIF_07.09.2015.tsv");
+
+normalize_field_names <- function(x) {
+	gsub("[()]", "", gsub("[ -]", "_", tolower(x)))
+}
+
+normalize_df_field_names <- function(d) {
+	colnames(d) <- normalize_field_names(colnames(d));
+	d
+}
+
+rename_df_field <- function(d, from, to) {
+	i <- match(from, colnames(d));
+	if (length(i) == 1) {
+		colnames(d)[i] <- to;
+	} else if (length(i) == 0) {
+		stop("Field name cannot be found");
+	} else {
+		stop("Field name is not unique");
+	}
+	d
+}
+
+remove_df_field <- function(d, name) {
+	i <- match(name, colnames(d));
+	if (length(i) > 0) {
+		d[, -i]
+	} else {
+		stop("field name ", name, " is not found");
+	}
+}
+
+#bmet.n <- bmet %>%
+#	normalize_df_field_names %>%
+#	rename_df_field("track_id", "pair_id") %>%
+#	rename_df_field("primary_sid", "primary_pair_id") %>%
+#	rename_df_field("met_sid", "met_pair_id") %>%
+#	rename_df_field("primet", "primary_met_type") %>%
+#	rename_df_field("id", "patient_id") %>%
+#	remove_df_field("met_ok");
+
+clin.n <- clin %>%
+	normalize_df_field_names %>%
+	rename_df_field("track_id", "pair_id") %>%
+	rename_df_field("primary_sid", "primary_pair_id") %>%
+	rename_df_field("met_sid", "met_pair_id") %>%
+	rename_df_field("primet", "primary_met_type") %>%
+	rename_df_field("id", "patient_id") %>%
+	remove_df_field("met_ok");
+
+phylogic.n <- phylogic %>%
+	normalize_df_field_names %>%
+	rename_df_field("sample", "sample_description") %>%
+	rename_df_field("sample_type", "met_type");
+
+unpaired.n <- unpaired[, -1] %>%
+	normalize_df_field_names %>%
+	rename_df_field("met_sid", "pair_id");
+
+rna.n <- rna[, 2:3] %>%
+	normalize_df_field_names %>%
+	rename_df_field("individual_id", "rnaseq_id");
+
+merged <- phylogic.n %>%
+	#merge(unpaired.n[! unpaired.n$pair_id %in% phylogic.n$pair_id, ], all=TRUE) %>%
+	merge(rna.n, all=TRUE);
+
+# add missing samples from clin.n into merged
+merged$met_type <- as.character(merged$met_type);
+idx <- ! clin.n$patient_id %in% merged$patient_id;
+for (i in which(idx)) {
+	xi <- merged[1, ];
+	xi[1, ] <- NA;
+	if (!is.na(clin.n$primary_pair_id[i]) && ! clin.n$primary_pair_id[i] %in% merged$pair_id) {
+		xi$pair_id = clin.n$primary_pair_id[i];
+		xi$patient_id = clin.n$patient_id[i];
+		xi$met_type = "Prmary";
+		merged <- rbind(merged, xi);
+	}
+	if (!is.na(clin.n$met_pair_id[i]) && ! clin.n$met_pair_id[i] %in% merged$pair_id) {
+		xi$pair_id = clin.n$met_pair_id[i];
+		xi$patient_id = clin.n$patient_id[i];
+		# Problem: do not know the metastatic type of these missing samples
+		xi$met_type = "M";
+		merged <- rbind(merged, xi);
+	}
+}
+
+
+pair_ids.missing <- as.character(merged$pair_id[!is.na(merged$rnaseq_id) & is.na(merged$met_type)]);
+
+merged$patient_id <- as.character(merged$patient_id);
+
+i <- merged$pair_id == "PB-LS-004-TP-NT-SM-7M185-SM-7M186";
+merged$patient_id[i] <- "PB-LS-004";
+merged$met_type[i] <- "Primary";
+
+i <- merged$pair_id == "PB0067-TP-NT-SM-3WL9V-SM-PB0067-N";
+merged$patient_id[i] <- "0067-MT";
+merged$met_type[i] <- "Primary";
+
+i <- merged$pair_id == "PB0067-TP-NT-SM-3WL9W-SM-PB0067-N";
+merged$patient_id[i] <- "0067-MT";
+merged$met_type[i] <- "Primary";
+
+i <- merged$pair_id == "PB0300-TM-NT-SM-2XUEX-SM-2XUEY";
+merged$patient_id[i] <- "0300-MT";
+merged$met_type[i] <- "BM"; # ??
+
+i <- merged$pair_id == "PB0387-TP-NT-SM-2XUIF-SM-2XUIE";
+merged$patient_id[i] <- "PB0387";
+merged$met_type[i] <- "BM";
+
+#histology.df <- clin.n[match(d$patient_id, clin.n$patient_id), c("patient_id", "histology_group")]
+
+# hideous hack to derive tumour ids (used in exome-seq output)
+merged$tumor_id <-
+	gsub("-SM-[^-]+-N$", "",
+	gsub("-SM-[^-]+$", "",
+	gsub("-T.-NT-", "-Tumor-", merged$pair_id)));
+
+#exome.seq <- qread("../exome-seq/luad-bm_sig-snvs_exome-seq_mutsigcv.tsv", quote="");
+#stopifnot(all(!is.na(match(exome.seq$Tumor_Sample_Barcode, merged$tumor_id))))
+
+#cna <- qread("../cn/combined_gene_corrected_CN.txt", type="mtx");
+#idx <- is.na(match(colnames(cna), merged$pair_id));
+#colnames(cna)[idx]
+
+merged.rnaseq <- merged[!is.na(merged$rnaseq_id), ];
+
+idx <- merged.rnaseq$pair_id%in% colnames(cna)
+merged.rnaseq$pair_id[!idx]
+
+
+merged$histology_group <- clin.n[match(merged$patient_id, clin.n$patient_id), "histology_group"];
+
+stopifnot(all(!duplicated(merged$pair_id)));
+
+qwrite(merged, filename("sample-info", ext="tsv"));
+qwrite(clin.n, filename("patient-info", ext="tsv"));
+qwrite(merged[!is.na(merged$rnaseq_id), ], filename("sample-info_rnaseq", ext="tsv"));
+
